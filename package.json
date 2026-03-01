@@ -1,0 +1,13 @@
+{
+  "name": "hr-bot",
+  "type": "module",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "grammy": "^1.25.0",
+    "pg": "^8.12.0"
+  }
+}
