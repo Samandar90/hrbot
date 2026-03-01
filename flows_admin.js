@@ -370,8 +370,8 @@ export async function handleAdminQuestionText(ctx) {
     const sort = sortRes.rows[0].s;
 
     await q(
-      "insert into vacancy_questions(vacancy_id,sort,q_type,text,options,required) values($1,$2,$3,$4,$5,$6)",
-      [vacId, sort, "text", msg, [], true],
+      "insert into vacancy_questions(vacancy_id,sort,q_type,text,options,required) values($1,$2,$3,$4,$5::jsonb,$6)",
+      [vacId, sort, "choice", qText, JSON.stringify(opts), true],
     );
 
     await clearState(userId);
@@ -388,8 +388,8 @@ export async function handleAdminQuestionText(ctx) {
     const sort = sortRes.rows[0].s;
 
     await q(
-      "insert into vacancy_questions(vacancy_id,sort,q_type,text,options,required) values($1,$2,$3,$4,$5,$6)",
-      [vacId, sort, "yesno", msg, ["Ha", "Yo‘q"], true],
+      "insert into vacancy_questions(vacancy_id,sort,q_type,text,options,required) values($1,$2,$3,$4,$5::jsonb,$6)",
+      [vacId, sort, "yesno", msg, JSON.stringify(["Ha", "Yo‘q"]), true],
     );
 
     await clearState(userId);
@@ -429,8 +429,8 @@ export async function handleAdminQuestionText(ctx) {
     const sort = sortRes.rows[0].s;
 
     await q(
-      "insert into vacancy_questions(vacancy_id,sort,q_type,text,options,required) values($1,$2,$3,$4,$5,$6)",
-      [vacId, sort, "choice", qText, opts, true],
+      "insert into vacancy_questions(vacancy_id,sort,q_type,text,options,required) values($1,$2,$3,$4,$5::jsonb,$6)",
+      [vacId, sort, "text", msg, "[]", true],
     );
 
     await clearState(userId);
