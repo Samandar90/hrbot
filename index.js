@@ -1,4 +1,4 @@
-// index.js
+// index.js (REWRITE - STABLE)
 import "dotenv/config";
 import { Bot } from "grammy";
 import http from "http";
@@ -19,7 +19,7 @@ import {
 
 const bot = new Bot(process.env.BOT_TOKEN);
 
-// Health check for Render (keeps service happy)
+// Health check for Render
 http
   .createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
@@ -34,7 +34,7 @@ await q("select 1");
 bot.command("start", async (ctx) => startCandidate(ctx));
 
 bot.command("help", async (ctx) => {
-  const txt = isAdmin(ctx.from.id)
+  const txt = isAdmin(ctx.from?.id)
     ? "Admin buyruqlar:\n/myid\n/vacancy_new\n/vacancy_list\n/vacancy_delete\n/question_delete_last\n\nNomzodlar: /start"
     : "Ariza topshirish: /start";
   await ctx.reply(txt);
@@ -44,38 +44,34 @@ bot.command("myid", async (ctx) => {
   await ctx.reply(`Sizning Telegram ID: ${ctx.from.id}`);
 });
 
-// ===== Text messages router =====
+// Admin commands as real commands (more reliable than text matching)
+bot.command("vacancy_new", async (ctx) => handleAdminCommands(ctx));
+bot.command("vacancy_list", async (ctx) => handleAdminCommands(ctx));
+bot.command("vacancy_delete", async (ctx) => handleAdminCommands(ctx));
+bot.command("question_delete_last", async (ctx) => handleAdminCommands(ctx));
+
+// ===== Text messages router (FSM + candidate answers) =====
 bot.on("message:text", async (ctx) => {
-  const t = (ctx.message.text || "").trim();
-
-  // Admin command handlers
-  if (
-    t === "/vacancy_new" ||
-    t === "/vacancy_list" ||
-    t === "/vacancy_delete" ||
-    t === "/question_delete_last" ||
-    t.startsWith("/vacancy_")
-  ) {
-    return handleAdminCommands(ctx);
-  }
-
-  // Admin interactive flows (adding questions / asking candidate)
-  await handleAdminQuestionText(ctx);
+  // 1) Admin states (vacancy create/delete/ask)
   await handleAdminMessages(ctx);
 
-  // Candidate flow (answers)
+  // 2) Admin question builder states (add question text/options)
+  await handleAdminQuestionText(ctx);
+
+  // 3) Candidate answers
   await handleCandidateMessages(ctx);
 });
 
 // ===== Callbacks (inline buttons) =====
 bot.on("callback_query:data", async (ctx) => {
-  // Admin callbacks (filters/questions/on/off/ask)
+  // Admin callbacks
   await handleAdminCallbacks(ctx);
 
-  // Candidate callbacks (vacancy pick / choice answers)
+  // Candidate callbacks
   await handleCandidateCallbacks(ctx);
 });
 
 bot.catch((err) => console.error("BOT ERROR:", err));
 
+console.log("Bot starting...");
 bot.start();

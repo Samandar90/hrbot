@@ -1,8 +1,11 @@
-// flows_admin.js
+// flows_admin.js (REWRITE - STABLE)
 import { q, setState, getState, clearState, isAdmin } from "./db.js";
 import { InlineKeyboard } from "grammy";
 import { kbAdminVacancyActions } from "./keyboards.js";
 
+/* =========================
+   ADMIN COMMANDS
+========================= */
 export async function handleAdminCommands(ctx) {
   const userId = ctx.from?.id;
   if (!userId || !isAdmin(userId)) {
@@ -24,6 +27,7 @@ export async function handleAdminCommands(ctx) {
       await ctx.reply("Hozircha vakansiya yo‘q.");
       return;
     }
+
     for (const v of r.rows) {
       await ctx.reply(
         `#${v.id} — ${v.title}\nButton: ${v.button_text}\nHolat: ${
@@ -51,6 +55,7 @@ export async function handleAdminCommands(ctx) {
     return;
   }
 
+  // helpers (optional)
   if (text.startsWith("/vacancy_filters")) {
     await ctx.reply(
       "Vakansiyalar ro‘yxatini ko‘rish uchun /vacancy_list bosing, keyin ⚙️ Filtrlar ni tanlang.",
@@ -66,15 +71,22 @@ export async function handleAdminCommands(ctx) {
   }
 }
 
+/* =========================
+   ADMIN STATE MESSAGES
+   (vacancy creation, deletes, ask candidate)
+========================= */
 export async function handleAdminMessages(ctx) {
   const userId = ctx.from?.id;
   if (!userId || !isAdmin(userId)) return;
 
-  const { state, data } = await getState(userId);
   const msg = ctx.message?.text?.trim();
   if (!msg) return;
 
-  // Create vacancy flow
+  const st = await getState(userId);
+  const state = st?.state || "idle";
+  const data = st?.data || {};
+
+  // --- Create vacancy flow ---
   if (state === "admin_vac_new_title") {
     await setState(userId, "admin_vac_new_button", { title: msg });
     await ctx.reply("Button matnini yozing. (misol: 🛒 Sotuvchi)");
@@ -82,33 +94,57 @@ export async function handleAdminMessages(ctx) {
   }
 
   if (state === "admin_vac_new_button") {
-    const title = data.title;
+    const title = (data.title || "").trim();
+    if (!title) {
+      await clearState(userId);
+      await ctx.reply(
+        "Xatolik: vakansiya nomi topilmadi. Qaytadan: /vacancy_new",
+      );
+      return;
+    }
+
     const button = msg;
-    const r = await q(
-      "insert into vacancies(title, button_text) values($1,$2) returning id",
-      [title, button],
-    );
-    await clearState(userId);
-    await ctx.reply(
-      `✅ Yaratildi. Vakansiya ID: ${r.rows[0].id}\nEndi filtr/savol qo‘shishingiz mumkin: /vacancy_list`,
-    );
+
+    try {
+      const r = await q(
+        "insert into vacancies(title, button_text) values($1,$2) returning id",
+        [title, button],
+      );
+
+      await clearState(userId);
+      await ctx.reply(
+        `✅ Yaratildi. Vakansiya ID: ${r.rows[0].id}\nEndi filtr/savol qo‘shishingiz mumkin: /vacancy_list`,
+      );
+    } catch (e) {
+      await clearState(userId);
+      await ctx.reply(
+        "Xatolik: vakansiya yaratilmadi. Qaytadan urinib ko‘ring: /vacancy_new",
+      );
+      console.error("vacancy insert error:", e);
+    }
     return;
   }
 
-  // Delete vacancy by id
+  // --- Delete vacancy by id ---
   if (state === "admin_vac_delete_wait_id") {
     const id = Number(msg);
-    if (!Number.isFinite(id)) return ctx.reply("ID raqam bo‘lishi kerak.");
+    if (!Number.isFinite(id)) {
+      await ctx.reply("ID raqam bo‘lishi kerak.");
+      return;
+    }
     await q("delete from vacancies where id=$1", [id]);
     await clearState(userId);
     await ctx.reply(`✅ Vakansiya #${id} o‘chirildi (agar mavjud bo‘lsa).`);
     return;
   }
 
-  // Delete last question in vacancy
+  // --- Delete last question in vacancy ---
   if (state === "admin_q_delete_last_wait_vac") {
     const vacId = Number(msg);
-    if (!Number.isFinite(vacId)) return ctx.reply("ID raqam bo‘lishi kerak.");
+    if (!Number.isFinite(vacId)) {
+      await ctx.reply("ID raqam bo‘lishi kerak.");
+      return;
+    }
 
     const last = await q(
       "select id from vacancy_questions where vacancy_id=$1 order by sort desc, id desc limit 1",
@@ -127,9 +163,14 @@ export async function handleAdminMessages(ctx) {
     return;
   }
 
-  // Ask candidate flow: admin writes message to candidate
+  // --- Ask candidate flow ---
   if (state === "admin_ask_candidate") {
-    const { appId } = data;
+    const appId = Number(data.appId);
+    if (!Number.isFinite(appId)) {
+      await clearState(userId);
+      await ctx.reply("Xatolik: appId topilmadi.");
+      return;
+    }
 
     const ar = await q("select user_id from applications where id=$1", [appId]);
     if (!ar.rowCount) {
@@ -146,6 +187,9 @@ export async function handleAdminMessages(ctx) {
   }
 }
 
+/* =========================
+   ADMIN CALLBACKS (buttons)
+========================= */
 export async function handleAdminCallbacks(ctx) {
   const userId = ctx.from?.id;
   if (!userId || !isAdmin(userId)) return;
@@ -178,6 +222,7 @@ export async function handleAdminCallbacks(ctx) {
       .text("🚫 Alkogol yo‘q (Yetkazib)", `f_add:${vacId}:no_alcohol`)
       .row()
       .text("🧹 Filtrlarni tozalash", `f_clear:${vacId}`);
+
     await ctx.editMessageText(`⚙️ Filtrlar (vakansiya #${vacId})`, {
       reply_markup: kb,
     });
@@ -252,6 +297,7 @@ export async function handleAdminCallbacks(ctx) {
       .text("➕ Choice savol", `q_add:${vacId}:choice`)
       .row()
       .text("🧹 Savollarni tozalash", `q_clear:${vacId}`);
+
     await ctx.editMessageText(`🧩 Savollar (vakansiya #${vacId})`, {
       reply_markup: kb,
     });
@@ -301,16 +347,22 @@ export async function handleAdminCallbacks(ctx) {
   }
 }
 
+/* =========================
+   ADMIN: ADD QUESTIONS (TEXT INPUT)
+========================= */
 export async function handleAdminQuestionText(ctx) {
   const userId = ctx.from?.id;
   if (!userId || !isAdmin(userId)) return;
 
-  const { state, data } = await getState(userId);
   const msg = ctx.message?.text?.trim();
   if (!msg) return;
 
+  const st = await getState(userId);
+  const state = st?.state || "idle";
+  const data = st?.data || {};
+
   if (state === "admin_q_add_text") {
-    const vacId = data.vacId;
+    const vacId = Number(data.vacId);
     const sortRes = await q(
       "select coalesce(max(sort),0)+10 as s from vacancy_questions where vacancy_id=$1",
       [vacId],
@@ -328,7 +380,7 @@ export async function handleAdminQuestionText(ctx) {
   }
 
   if (state === "admin_q_add_yesno") {
-    const vacId = data.vacId;
+    const vacId = Number(data.vacId);
     const sortRes = await q(
       "select coalesce(max(sort),0)+10 as s from vacancy_questions where vacancy_id=$1",
       [vacId],
@@ -357,8 +409,8 @@ export async function handleAdminQuestionText(ctx) {
   }
 
   if (state === "admin_q_add_choice_opts") {
-    const vacId = data.vacId;
-    const qText = data.text;
+    const vacId = Number(data.vacId);
+    const qText = (data.text || "").trim();
 
     const opts = msg
       .split(",")
