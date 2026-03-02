@@ -1,6 +1,31 @@
+// flows_candidate.js (PRO+ - CLEAN CHAT, NO DEFAULT QUESTIONS, NO DUPES)
 import { q, setState, getState, clearState } from "./db.js";
-import { kbVacancies, kbYesNo, kbStatus } from "./keyboards.js";
-import { InlineKeyboard } from "grammy";
+import {
+  kbVacancies,
+  kbStatus,
+  kbChoice,
+  kbYesNoSimple,
+  kbBackRestart,
+  kbLicense,
+  kbAlcohol,
+} from "./keyboards.js";
+
+/* =========================
+   Helpers
+========================= */
+function normalizeOptions(value) {
+  // pg jsonb usually becomes object/array, but sometimes string
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (_) {
+      return [];
+    }
+  }
+  return [];
+}
 
 async function getActiveVacancies() {
   const r = await q(
@@ -24,37 +49,146 @@ async function getFilters(vacId) {
 
 async function getQuestions(vacId) {
   const r = await q(
-    "select * from vacancy_questions where vacancy_id=$1 order by sort asc, id asc",
+    "select id, q_type, text, options from vacancy_questions where vacancy_id=$1 order by sort asc, id asc",
     [vacId],
   );
   return r.rows;
 }
 
-export async function startCandidate(ctx) {
-  const vacs = await getActiveVacancies();
-  if (!vacs.length) return ctx.reply("Hozircha bo‘sh ish o‘rinlari yo‘q.");
-  await clearState(ctx.from.id);
-  await ctx.reply(
-    "Assalomu alaykum! Ishga ariza topshirish uchun yo‘nalishni tanlang:",
-    { reply_markup: kbVacancies(vacs) },
-  );
+/* =========================
+   Clean chat engine
+========================= */
+async function getUi(userId) {
+  const st = await getState(userId);
+  return st?.data?.ui || {};
 }
 
+async function setUi(userId, patch) {
+  const st = await getState(userId);
+  const data = st?.data || {};
+  data.ui = { ...(data.ui || {}), ...patch };
+  await setState(userId, st?.state || "idle", data);
+}
+
+async function safeDelete(ctx, chatId, messageId) {
+  if (!chatId || !messageId) return;
+  try {
+    await ctx.api.deleteMessage(chatId, messageId);
+  } catch (_) {}
+}
+
+async function deletePromptIfAny(ctx, userId) {
+  const chatId = ctx.chat?.id;
+  const ui = await getUi(userId);
+  if (ui.prompt_mid) {
+    await safeDelete(ctx, chatId, ui.prompt_mid);
+    await setUi(userId, { prompt_mid: null });
+  }
+}
+
+async function upsertMain(ctx, userId, text, reply_markup) {
+  const chatId = ctx.chat?.id;
+  const ui = await getUi(userId);
+
+  if (ui.main_mid) {
+    try {
+      await ctx.api.editMessageText(chatId, ui.main_mid, text, {
+        reply_markup,
+      });
+      return ui.main_mid;
+    } catch (_) {}
+  }
+
+  if (ui.main_mid) await safeDelete(ctx, chatId, ui.main_mid);
+
+  const m = await ctx.api.sendMessage(chatId, text, { reply_markup });
+  await setUi(userId, { main_mid: m.message_id });
+  return m.message_id;
+}
+
+async function sendPrompt(ctx, userId, text, reply_markup) {
+  const chatId = ctx.chat?.id;
+  const ui = await getUi(userId);
+
+  if (ui.prompt_mid) await safeDelete(ctx, chatId, ui.prompt_mid);
+
+  const m = await ctx.api.sendMessage(chatId, text, { reply_markup });
+  await setUi(userId, { prompt_mid: m.message_id });
+  return m.message_id;
+}
+
+/* =========================
+   Public API
+========================= */
+export async function startCandidate(ctx) {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+
+  const vacs = await getActiveVacancies();
+  await clearState(userId);
+
+  if (!vacs.length) {
+    await upsertMain(ctx, userId, "Hozircha bo‘sh ish o‘rinlari yo‘q.", null);
+    return;
+  }
+
+  await setState(userId, "cand_pick_vacancy", {
+    ui: {},
+    started_at: Date.now(),
+  });
+
+  await upsertMain(
+    ctx,
+    userId,
+    "Assalomu alaykum!\nIshga ariza topshirish uchun yo‘nalishni tanlang:",
+    kbVacancies(vacs),
+  );
+
+  await deletePromptIfAny(ctx, userId);
+}
+
+/* =========================
+   Callbacks
+========================= */
 export async function handleCandidateCallbacks(ctx) {
   const data = ctx.callbackQuery?.data || "";
   const userId = ctx.from?.id;
   if (!userId) return;
 
-  // Выбор вакансии
+  // Admin status buttons (admin chat)
+  if (data.startsWith("st:")) {
+    const [, appIdStr, st] = data.split(":");
+    const appId = Number(appIdStr);
+    await q("update applications set status=$1 where id=$2", [st, appId]);
+    await ctx.answerCallbackQuery({ text: "Saqlangan" });
+    return;
+  }
+
+  // Candidate controls
+  if (data === "cand:restart") {
+    await ctx.answerCallbackQuery();
+    await startCandidate(ctx);
+    return;
+  }
+
+  if (data === "cand:back") {
+    await ctx.answerCallbackQuery();
+    await startCandidate(ctx);
+    return;
+  }
+
+  // Pick vacancy
   if (data.startsWith("vac:")) {
     const vacId = Number(data.split(":")[1]);
     const vac = await getVacancy(vacId);
+
     if (!vac || !vac.is_active) {
       await ctx.answerCallbackQuery({ text: "Bu vakansiya hozir faol emas." });
       return;
     }
 
-    // создаем application
+    await ctx.answerCallbackQuery();
+
     const app = await q(
       `insert into applications(vacancy_id,user_id,username,full_name)
        values($1,$2,$3,$4) returning id`,
@@ -67,57 +201,62 @@ export async function handleCandidateCallbacks(ctx) {
     );
     const appId = app.rows[0].id;
 
-    await setState(userId, "cand_filter_age", {
+    const payload = {
       vacId,
       appId,
-      step: 0,
-      answers: {},
-    });
-    await ctx.answerCallbackQuery();
-    await ctx.api.sendMessage(
+      age: null,
+      filtersResp: {},
+      qIndex: 0,
+      questions: [],
+      ui: (await getUi(userId)) || {},
+    };
+
+    await setState(userId, "cand_filters", payload);
+
+    await upsertMain(
+      ctx,
       userId,
-      "Yaxshi. Endi bir nechta savollarga javob bering.\n\nYoshingiz nechida? (raqam)",
+      `Tanlandi: ${vac.button_text}\n\nDavom etamiz ✅`,
+      kbBackRestart(),
     );
+
+    await continueFilters(ctx);
     return;
   }
 
-  // status buttons in admin chat
-  if (data.startsWith("st:")) {
-    const [, appIdStr, st] = data.split(":");
-    const appId = Number(appIdStr);
-    await q("update applications set status=$1 where id=$2", [st, appId]);
-    await ctx.answerCallbackQuery({ text: "Saqlangan" });
-    return;
-  }
-
-  // Candidate answers for yes/no or choice in inline mode
+  // answers (yes/no or choice)
   if (data.startsWith("ans:")) {
-    const [, value] = data.split(":"); // ans:Ha etc
+    const value = data.slice(4);
     await ctx.answerCallbackQuery();
 
     const st = await getState(userId);
-    if (st.state !== "cand_wait_choice") return;
+    if (!st || st.state !== "cand_wait_choice") return;
 
     await processAnswer(ctx, value);
+    return;
   }
 
-  // фильтры license/alcohol callbacks
+  // filter responses
   if (data.startsWith("fresp:")) {
-    const [, key, value] = data.split(":"); // fresp:alcohol:yes/no or fresp:license:bc/other
     await ctx.answerCallbackQuery();
 
     const st = await getState(userId);
-    if (st.state !== "cand_filters_extra") return;
+    if (!st || st.state !== "cand_filters") return;
 
+    const [, key, value] = data.split(":");
     const payload = st.data;
     payload.filtersResp = payload.filtersResp || {};
     payload.filtersResp[key] = value;
-    await setState(userId, "cand_filters_extra", payload);
 
-    await continueFilters(ctx, payload);
+    await setState(userId, "cand_filters", payload);
+    await continueFilters(ctx);
+    return;
   }
 }
 
+/* =========================
+   Text Messages
+========================= */
 export async function handleCandidateMessages(ctx) {
   const userId = ctx.from?.id;
   if (!userId) return;
@@ -128,14 +267,23 @@ export async function handleCandidateMessages(ctx) {
   const text = ctx.message?.text?.trim();
   if (!text) return;
 
-  if (st.state === "cand_filter_age") {
+  if (st.state === "cand_wait_age") {
     const age = Number(text);
-    if (!Number.isFinite(age))
-      return ctx.reply("Iltimos, yoshni raqam bilan yozing.");
+    if (!Number.isFinite(age)) {
+      await sendPrompt(
+        ctx,
+        userId,
+        "Iltimos, yoshni raqam bilan yozing.",
+        kbBackRestart(),
+      );
+      return;
+    }
+
     const payload = st.data;
     payload.age = age;
-    await setState(userId, "cand_filters_extra", payload);
-    await continueFilters(ctx, payload);
+
+    await setState(userId, "cand_filters", payload);
+    await continueFilters(ctx);
     return;
   }
 
@@ -145,86 +293,85 @@ export async function handleCandidateMessages(ctx) {
   }
 }
 
-async function continueFilters(ctx, payload) {
-  const { vacId, appId, age } = payload;
+/* =========================
+   Filters -> Questions
+========================= */
+async function continueFilters(ctx) {
+  const userId = ctx.from.id;
+  const st = await getState(userId);
+  const payload = st.data;
+
+  const { vacId, appId } = payload;
   const filters = await getFilters(vacId);
 
-  // age_range filter (если есть)
-  for (const f of filters) {
-    if (f.type === "age_range") {
-      const min = f.config?.min ?? 18;
-      const max = f.config?.max ?? 30;
-      if (age < min || age > max) {
-        await rejectAndClose(
-          ctx,
-          appId,
-          f.config?.fail_text || "Rahmat! Afsuski, talabga mos emassiz.",
-        );
-        return;
-      }
+  const ageFilter = filters.find((f) => f.type === "age_range");
+  if (ageFilter && (payload.age === null || payload.age === undefined)) {
+    await setState(userId, "cand_wait_age", payload);
+    await sendPrompt(
+      ctx,
+      userId,
+      "Yoshingiz nechida? (raqam)",
+      kbBackRestart(),
+    );
+    return;
+  }
+
+  if (ageFilter) {
+    const min = ageFilter.config?.min ?? 18;
+    const max = ageFilter.config?.max ?? 30;
+    const age = Number(payload.age);
+
+    if (!Number.isFinite(age) || age < min || age > max) {
+      await rejectAndClose(
+        ctx,
+        appId,
+        "Rahmat! Afsuski, yosh bo‘yicha mos emassiz.",
+      );
+      return;
     }
   }
 
-  // если нужны доп-фильтры для доставщика
   const needLicense = filters.some((f) => f.type === "license_bc");
   const needNoAlcohol = filters.some((f) => f.type === "no_alcohol");
   payload.filtersResp = payload.filtersResp || {};
 
   if (needLicense && !payload.filtersResp.license) {
-    const kb = new InlineKeyboard()
-      .text("B va C", "fresp:license:bc")
-      .row()
-      .text("Faqat B", "fresp:license:only_b")
-      .row()
-      .text("B yo‘q / Boshqa", "fresp:license:other");
-    await ctx.api.sendMessage(
-      ctx.from.id,
+    await setState(userId, "cand_filters", payload);
+    await sendPrompt(
+      ctx,
+      userId,
       "Haydovchilik guvohnomangiz qaysi toifada? (B va C shart)",
-      { reply_markup: kb },
+      kbLicense(),
     );
     return;
   }
 
   if (needLicense && payload.filtersResp.license !== "bc") {
-    const f = filters.find((x) => x.type === "license_bc");
-    await rejectAndClose(
-      ctx,
-      appId,
-      f?.config?.fail_text || "Rahmat! Afsuski, B va C toifalari shart.",
-    );
+    await rejectAndClose(ctx, appId, "B va C toifalari kerak.");
     return;
   }
 
   if (needNoAlcohol && !payload.filtersResp.alcohol) {
-    const kb = new InlineKeyboard()
-      .text("Yo‘q, ichmayman", "fresp:alcohol:no")
-      .text("Ha", "fresp:alcohol:yes");
-    await ctx.api.sendMessage(ctx.from.id, "Alkogol ichasizmi?", {
-      reply_markup: kb,
-    });
+    await setState(userId, "cand_filters", payload);
+    await sendPrompt(ctx, userId, "Alkogol ichasizmi?", kbAlcohol());
     return;
   }
 
   if (needNoAlcohol && payload.filtersResp.alcohol !== "no") {
-    const f = filters.find((x) => x.type === "no_alcohol");
-    await rejectAndClose(
-      ctx,
-      appId,
-      f?.config?.fail_text || "Rahmat! Afsuski, alkogol ichmaslik shart.",
-    );
+    await rejectAndClose(ctx, appId, "Bu ish uchun alkogol ichmaslik shart.");
     return;
   }
 
-  // filters passed -> start questions
-  payload.qIndex = 0;
   const qs = await getQuestions(vacId);
-  payload.questions = qs.map((q) => ({
-    id: q.id,
-    q_type: q.q_type,
-    text: q.text,
-    options: q.options,
+  payload.questions = (qs || []).map((x) => ({
+    id: x.id,
+    q_type: x.q_type,
+    text: x.text,
+    options: normalizeOptions(x.options),
   }));
-  await setState(ctx.from.id, "cand_asking", payload);
+  payload.qIndex = 0;
+
+  await setState(userId, "cand_asking", payload);
   await askNext(ctx);
 }
 
@@ -232,39 +379,52 @@ async function askNext(ctx) {
   const userId = ctx.from.id;
   const st = await getState(userId);
   const payload = st.data;
+
   const { qIndex, questions } = payload;
 
   if (!questions || qIndex >= questions.length) {
     await finalizeApplication(ctx, payload);
     await clearState(userId);
-    await ctx.reply("Rahmat! Arizangiz qabul qilindi. Tez orada bog‘lanamiz.");
+
+    await deletePromptIfAny(ctx, userId);
+    await upsertMain(
+      ctx,
+      userId,
+      "Rahmat! Arizangiz qabul qilindi ✅\nTez orada bog‘lanamiz.",
+      null,
+    );
     return;
   }
 
   const qn = questions[qIndex];
+  const total = questions.length;
+
+  await upsertMain(
+    ctx,
+    userId,
+    `Savol ${qIndex + 1}/${total}\n\n${qn.text}`,
+    kbBackRestart(),
+  );
 
   if (qn.q_type === "yesno") {
-    // inline
-    const kb = new InlineKeyboard()
-      .text("Ha", "ans:Ha")
-      .text("Yo‘q", "ans:Yo‘q");
     await setState(userId, "cand_wait_choice", payload);
-    await ctx.api.sendMessage(userId, qn.text, { reply_markup: kb });
+    await sendPrompt(ctx, userId, "Tanlang:", kbYesNoSimple());
     return;
   }
 
   if (qn.q_type === "choice") {
-    const kb = new InlineKeyboard();
-    for (const opt of qn.options || [])
-      kb.text(String(opt), `ans:${String(opt)}`).row();
     await setState(userId, "cand_wait_choice", payload);
-    await ctx.api.sendMessage(userId, qn.text, { reply_markup: kb });
+    await sendPrompt(
+      ctx,
+      userId,
+      "Variantni tanlang:",
+      kbChoice(qn.options || []),
+    );
     return;
   }
 
-  // text/number/phone -> plain text
   await setState(userId, "cand_wait_text", payload);
-  await ctx.api.sendMessage(userId, qn.text);
+  await sendPrompt(ctx, userId, "Javobingizni yozing:", kbBackRestart());
 }
 
 async function processAnswer(ctx, answer) {
@@ -272,10 +432,19 @@ async function processAnswer(ctx, answer) {
   const st = await getState(userId);
   const payload = st.data;
 
-  const qn = payload.questions[payload.qIndex];
-  // save answer in DB
+  const qn = payload.questions?.[payload.qIndex];
+  if (!qn) {
+    await clearState(userId);
+    await startCandidate(ctx);
+    return;
+  }
+
+  // NO DUPES: update if already exists
   await q(
-    "insert into application_answers(application_id, question_id, answer) values($1,$2,$3)",
+    `insert into application_answers(application_id, question_id, answer)
+     values($1,$2,$3)
+     on conflict (application_id, question_id)
+     do update set answer=excluded.answer`,
     [payload.appId, qn.id, String(answer)],
   );
 
@@ -285,10 +454,16 @@ async function processAnswer(ctx, answer) {
 }
 
 async function rejectAndClose(ctx, appId, text) {
+  const userId = ctx.from.id;
   await q("update applications set status='rejected' where id=$1", [appId]);
-  await clearState(ctx.from.id);
-  await ctx.reply(
+  await clearState(userId);
+
+  await deletePromptIfAny(ctx, userId);
+  await upsertMain(
+    ctx,
+    userId,
     text || "Rahmat! Afsuski, talablarimizga mos kelmadingiz. Omad tilaymiz.",
+    null,
   );
 }
 
@@ -322,7 +497,10 @@ async function finalizeApplication(ctx, payload) {
     `— Ism: ${a.full_name || "-"}\n` +
     `— Username: ${a.username ? "@" + a.username : "-"}\n` +
     `— UserID: ${a.user_id}\n` +
-    `— Yosh: ${payload.age ?? "-"}\n\n`;
+    (payload.age !== null && payload.age !== undefined
+      ? `— Yosh: ${payload.age}\n`
+      : "") +
+    `— Status: new\n\n`;
 
   for (const row of answers.rows) {
     msg += `• ${row.text}\n  → ${row.answer}\n`;

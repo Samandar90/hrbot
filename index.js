@@ -1,4 +1,4 @@
-// index.js (REWRITE - STABLE)
+// index.js (PRO - STABLE, MATCHES NEW flows_admin.js)
 import "dotenv/config";
 import { Bot } from "grammy";
 import http from "http";
@@ -8,7 +8,6 @@ import {
   handleAdminCommands,
   handleAdminMessages,
   handleAdminCallbacks,
-  handleAdminQuestionText,
 } from "./flows_admin.js";
 
 import {
@@ -19,7 +18,9 @@ import {
 
 const bot = new Bot(process.env.BOT_TOKEN);
 
-// Health check for Render
+/* =========================
+   Health check for Render
+========================= */
 http
   .createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
@@ -27,10 +28,14 @@ http
   })
   .listen(process.env.PORT || 3000);
 
-// DB ping on startup
+/* =========================
+   Startup DB ping
+========================= */
 await q("select 1");
 
-// ===== Commands =====
+/* =========================
+   Commands
+========================= */
 bot.command("start", async (ctx) => startCandidate(ctx));
 
 bot.command("help", async (ctx) => {
@@ -44,30 +49,46 @@ bot.command("myid", async (ctx) => {
   await ctx.reply(`Sizning Telegram ID: ${ctx.from.id}`);
 });
 
-// Admin commands as real commands (more reliable than text matching)
+// Admin commands (as real commands)
 bot.command("vacancy_new", async (ctx) => handleAdminCommands(ctx));
 bot.command("vacancy_list", async (ctx) => handleAdminCommands(ctx));
 bot.command("vacancy_delete", async (ctx) => handleAdminCommands(ctx));
 bot.command("question_delete_last", async (ctx) => handleAdminCommands(ctx));
 
-// ===== Text messages router (FSM + candidate answers) =====
+/* =========================
+   Text router (FSM)
+========================= */
 bot.on("message:text", async (ctx) => {
-  // 1) Admin states (vacancy create/delete/ask)
+  const t = (ctx.message.text || "").trim();
+
+  // If admin writes command as text (or with @botname) - support it too
+  const cmd = t.split(" ")[0].split("@")[0];
+
+  if (
+    cmd === "/vacancy_new" ||
+    cmd === "/vacancy_list" ||
+    cmd === "/vacancy_delete" ||
+    cmd === "/question_delete_last"
+  ) {
+    await handleAdminCommands(ctx);
+    return;
+  }
+
+  // 1) Admin FSM (create/delete/questions/ask candidate)
   await handleAdminMessages(ctx);
 
-  // 2) Admin question builder states (add question text/options)
-  await handleAdminQuestionText(ctx);
-
-  // 3) Candidate answers
+  // 2) Candidate FSM (age + answers)
   await handleCandidateMessages(ctx);
 });
 
-// ===== Callbacks (inline buttons) =====
+/* =========================
+   Callbacks
+========================= */
 bot.on("callback_query:data", async (ctx) => {
-  // Admin callbacks
+  // Admin callbacks first (filters/questions/on/off/ask/menu)
   await handleAdminCallbacks(ctx);
 
-  // Candidate callbacks
+  // Candidate callbacks (vacancy pick / answers / filters)
   await handleCandidateCallbacks(ctx);
 });
 
