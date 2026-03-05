@@ -1,126 +1,37 @@
-// keyboards.js (PREMIUM v2)
+// keyboards.js (FINAL)
 import { InlineKeyboard, Keyboard } from "grammy";
 
-/* ===============================
-   Candidate keyboards
-================================ */
-
-export function kbVacancies(vacancies) {
+/* ===== Candidate ===== */
+export function kbVacancies(vacs) {
   const kb = new InlineKeyboard();
-
-  for (let i = 0; i < vacancies.length; i += 2) {
-    const v1 = vacancies[i];
-    const v2 = vacancies[i + 1];
-
-    if (v2) {
-      kb.text(v1.button_text, `vac:${v1.id}`)
-        .text(v2.button_text, `vac:${v2.id}`)
-        .row();
-    } else {
-      kb.text(v1.button_text, `vac:${v1.id}`).row();
-    }
-  }
-
+  for (const v of vacs) kb.text(v.button_text, `cand:vac:${v.id}`).row();
   kb.row().text("ℹ️ Ma’lumot", "cand:info");
-  kb.row().text("🔄 Qayta", "cand:restart");
-
   return kb;
 }
 
-export function kbNav() {
+export function kbYesNo() {
+  return new InlineKeyboard()
+    .text("Ha", "cand:ans:Ha")
+    .text("Yo‘q", "cand:ans:Yo‘q");
+}
+
+export function kbChoice(options = []) {
+  const kb = new InlineKeyboard();
+  for (const opt of options)
+    kb.text(String(opt), `cand:ans:${String(opt)}`).row();
+  return kb;
+}
+
+export function kbCandidateNav() {
   return new InlineKeyboard()
     .text("⬅️ Ortga", "cand:back")
     .text("🔄 Qayta", "cand:restart");
 }
-
-export function kbAgeBuckets() {
-  return new InlineKeyboard()
-    .text("18–20", "age:18_20")
-    .text("21–25", "age:21_25")
-    .row()
-    .text("26–30", "age:26_30")
-    .text("31+", "age:31_plus")
-    .row()
-    .text("⬅️ Ortga", "cand:back")
-    .text("🔄 Qayta", "cand:restart");
-}
-
-export function kbLicense() {
-  return new InlineKeyboard()
-    .text("B + C", "fresp:license:bc")
-    .row()
-    .text("Faqat B", "fresp:license:only_b")
-    .row()
-    .text("Yo‘q / Boshqa", "fresp:license:other")
-    .row()
-    .text("⬅️ Ortga", "cand:back")
-    .text("🔄 Qayta", "cand:restart");
-}
-
-export function kbAlcohol() {
-  return new InlineKeyboard()
-    .text("Ichmayman", "fresp:alcohol:no")
-    .text("Ichaman", "fresp:alcohol:yes")
-    .row()
-    .text("⬅️ Ortga", "cand:back")
-    .text("🔄 Qayta", "cand:restart");
-}
-
-export function kbExperience() {
-  return new InlineKeyboard()
-    .text("0", "exp:0")
-    .text("1 yil", "exp:1")
-    .text("2+ yil", "exp:2p")
-    .row()
-    .text("⬅️ Ortga", "cand:back")
-    .text("🔄 Qayta", "cand:restart");
-}
-
-export function kbShift() {
-  return new InlineKeyboard()
-    .text("Kunduz", "shift:day")
-    .text("Kech", "shift:night")
-    .row()
-    .text("Farqi yo‘q", "shift:any")
-    .row()
-    .text("⬅️ Ortga", "cand:back")
-    .text("🔄 Qayta", "cand:restart");
-}
-
-export function kbStartPref() {
-  return new InlineKeyboard()
-    .text("Bugun", "start:today")
-    .text("Ertaga", "start:tomorrow")
-    .row()
-    .text("1 hafta ichida", "start:week")
-    .row()
-    .text("⬅️ Ortga", "cand:back")
-    .text("🔄 Qayta", "cand:restart");
-}
-
-export function kbConfirm() {
-  return new InlineKeyboard()
-    .text("✅ Tasdiqlash", "cand:confirm")
-    .row()
-    .text("✏️ Ismni o‘zgartirish", "cand:edit_name")
-    .text("📱 Telefonni o‘zgartirish", "cand:edit_phone")
-    .row()
-    .text("🔄 Qayta", "cand:restart");
-}
-
-export function kbInfoBack() {
-  return new InlineKeyboard().text("⬅️ Ortga", "cand:back");
-}
-
-/* ===============================
-   Contact keyboard
-================================ */
 
 export function kbRequestContact() {
   return new Keyboard()
     .requestContact("📱 Raqamni yuborish")
     .row()
-    .text("⬅️ Ortga")
     .text("🔄 Qayta")
     .oneTime()
     .resized();
@@ -130,16 +41,84 @@ export function kbRemoveReply() {
   return { remove_keyboard: true };
 }
 
-/* ===============================
-   Admin buttons
-================================ */
-
-export function kbStatus(appId) {
+/* ===== Admin ===== */
+export function kbAdminHome() {
   return new InlineKeyboard()
-    .text("✅ Qabul", `st:${appId}:accepted`)
-    .text("🟡 Zaxira", `st:${appId}:reserve`)
+    .text("📌 Vakansiyalar", "adm:vac:list")
     .row()
-    .text("❌ Rad", `st:${appId}:rejected`)
+    .text("🧾 Arizalar", "adm:apps:list:0")
     .row()
-    .text("💬 Savol berish", `ask:${appId}`);
+    .text("➕ Vakansiya qo‘shish", "adm:vac:new");
+}
+
+export function kbVacRow(v) {
+  return new InlineKeyboard()
+    .text(v.is_active ? "⛔ O‘chirish" : "✅ Yoqish", `adm:vac:toggle:${v.id}`)
+    .row()
+    .text("✏️ Nom", `adm:vac:edit_title:${v.id}`)
+    .text("🏷 Button", `adm:vac:edit_btn:${v.id}`)
+    .row()
+    .text("❓ Savollar", `adm:q:list:${v.id}`)
+    .row()
+    .text("🗑 O‘chirish", `adm:vac:delete:${v.id}`)
+    .row()
+    .text("⬅️ Ortga", "adm:home");
+}
+
+export function kbQuestionsHome(vacId) {
+  return new InlineKeyboard()
+    .text("➕ Savol qo‘shish", `adm:q:new:${vacId}`)
+    .row()
+    .text("⬅️ Ortga", `adm:vac:open:${vacId}`);
+}
+
+export function kbQuestionRow(vacId, qid) {
+  return new InlineKeyboard()
+    .text("✏️ Matn", `adm:q:edit_text:${vacId}:${qid}`)
+    .row()
+    .text("🔢 Sort", `adm:q:edit_sort:${vacId}:${qid}`)
+    .row()
+    .text("✅ Javob", `adm:q:edit_correct:${vacId}:${qid}`)
+    .row()
+    .text("🗑 O‘chirish", `adm:q:delete:${vacId}:${qid}`)
+    .row()
+    .text("⬅️ Ortga", `adm:q:list:${vacId}`);
+}
+
+export function kbPickQType(vacId) {
+  return new InlineKeyboard()
+    .text("📌 Choice", `adm:q:type:${vacId}:choice`)
+    .row()
+    .text("✅ Yes/No", `adm:q:type:${vacId}:yesno`)
+    .row()
+    .text("✍️ Text", `adm:q:type:${vacId}:text`)
+    .row()
+    .text("🔢 Number", `adm:q:type:${vacId}:number`)
+    .row()
+    .text("📱 Phone", `adm:q:type:${vacId}:phone`)
+    .row()
+    .text("⬅️ Ortga", `adm:q:list:${vacId}`);
+}
+
+export function kbAppRow(appId) {
+  return new InlineKeyboard()
+    .text("👁 Ko‘rish", `adm:app:open:${appId}`)
+    .row()
+    .text("✅ Qabul", `adm:app:st:${appId}:accepted`)
+    .text("🟡 Zaxira", `adm:app:st:${appId}:reserve`)
+    .row()
+    .text("❌ Rad", `adm:app:st:${appId}:rejected`)
+    .row()
+    .text("💬 Savol", `adm:app:ask:${appId}`)
+    .row()
+    .text("⬅️ Ortga", "adm:apps:list:0");
+}
+
+export function kbAppsPager(page) {
+  const kb = new InlineKeyboard();
+  if (page > 0) kb.text("⬅️", `adm:apps:list:${page - 1}`);
+  kb.text("🔄 Yangilash", `adm:apps:list:${page}`);
+  kb.text("➡️", `adm:apps:list:${page + 1}`);
+  kb.row().text("⬅️ Menu", "adm:home");
+  return kb;
 }

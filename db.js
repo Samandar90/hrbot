@@ -1,35 +1,16 @@
-// db.js (PRO - STABLE)
+// db.js (FINAL)
 import pkg from "pg";
 const { Pool } = pkg;
 
-const DATABASE_URL = process.env.DATABASE_URL || "";
-
 export const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: DATABASE_URL.includes("render.com")
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL?.includes("render.com")
     ? { rejectUnauthorized: false }
     : undefined,
-  max: 10,
-  idleTimeoutMillis: 30_000,
-  connectionTimeoutMillis: 10_000,
 });
 
 export async function q(text, params = []) {
-  try {
-    return await pool.query(text, params);
-  } catch (err) {
-    console.error("DB ERROR:", {
-      message: err?.message,
-      code: err?.code,
-      detail: err?.detail,
-      query: text,
-    });
-    throw err;
-  }
-}
-
-export function jsonParam(value) {
-  return JSON.stringify(value ?? {});
+  return pool.query(text, params);
 }
 
 export async function getState(userId) {
@@ -45,7 +26,7 @@ export async function setState(userId, state, data = {}) {
      values($1,$2,$3::jsonb)
      on conflict (user_id)
      do update set state=$2, data=$3::jsonb, updated_at=now()`,
-    [userId, state, jsonParam(data)],
+    [userId, state, JSON.stringify(data)],
   );
 }
 

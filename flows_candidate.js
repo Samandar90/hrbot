@@ -1,23 +1,14 @@
-// flows_candidate.js (PREMIUM CLEAN v2)
+// flows_candidate.js (FINAL)
 import { q, setState, getState, clearState } from "./db.js";
 import {
   kbVacancies,
-  kbNav,
-  kbAgeBuckets,
-  kbLicense,
-  kbAlcohol,
-  kbExperience,
-  kbShift,
-  kbStartPref,
-  kbConfirm,
-  kbInfoBack,
+  kbYesNo,
+  kbChoice,
+  kbCandidateNav,
   kbRequestContact,
   kbRemoveReply,
 } from "./keyboards.js";
 
-/* =========================
-   DB helpers
-========================= */
 async function getActiveVacancies() {
   const r = await q(
     "select id, button_text from vacancies where is_active=true order by id asc",
@@ -30,449 +21,198 @@ async function getVacancy(vacId) {
   return r.rowCount ? r.rows[0] : null;
 }
 
-async function getFilters(vacId) {
+async function getQuestions(vacId) {
   const r = await q(
-    "select type, config from vacancy_filters where vacancy_id=$1",
+    `select id, q_type, text, options, correct_answer, points, is_scored, required
+     from vacancy_questions
+     where vacancy_id=$1
+     order by sort asc, id asc`,
     [vacId],
   );
   return r.rows;
 }
 
-/* =========================
-   UI engine (main + prompt)
-   - main_mid: one main message (edited)
-   - prompt_mid: one prompt message (edited)
-========================= */
-async function readState(userId) {
-  const st = await getState(userId);
-  return {
-    state: st?.state || "idle",
-    data: st?.data || {},
-  };
-}
-
-async function writeState(userId, state, data) {
-  await setState(userId, state, data);
-}
-
-function getUi(data) {
-  return data?.ui || {};
-}
-
-function setUi(data, patch) {
-  const ui = { ...(data.ui || {}), ...patch };
-  return { ...data, ui };
-}
-
-async function safeDelete(ctx, chatId, mid) {
-  if (!chatId || !mid) return;
-  try {
-    await ctx.api.deleteMessage(chatId, mid);
-  } catch (_) {}
-}
-
-async function upsertMain(ctx, userId, text, reply_markup) {
-  const chatId = ctx.chat?.id;
-  const { state, data } = await readState(userId);
-  const ui = getUi(data);
-
-  if (ui.main_mid) {
-    try {
-      await ctx.api.editMessageText(chatId, ui.main_mid, text, {
-        reply_markup: reply_markup || undefined,
-      });
-      return ui.main_mid;
-    } catch (_) {
-      // fallthrough -> send new
-    }
-  }
-
-  if (ui.main_mid) await safeDelete(ctx, chatId, ui.main_mid);
-  const m = await ctx.api.sendMessage(chatId, text, {
-    reply_markup: reply_markup || undefined,
-  });
-
-  const newData = setUi(data, { main_mid: m.message_id });
-  await writeState(userId, state, newData);
-  return m.message_id;
-}
-
-// prompt = small helper message (also edited, not multiplied)
-async function upsertPrompt(ctx, userId, text, extra = {}) {
-  const chatId = ctx.chat?.id;
-  const { state, data } = await readState(userId);
-  const ui = getUi(data);
-
-  if (ui.prompt_mid) {
-    try {
-      await ctx.api.editMessageText(chatId, ui.prompt_mid, text, {
-        reply_markup: extra.reply_markup || undefined,
-      });
-      return ui.prompt_mid;
-    } catch (_) {
-      // fallthrough -> send new
-    }
-  }
-
-  if (ui.prompt_mid) await safeDelete(ctx, chatId, ui.prompt_mid);
-  const m = await ctx.api.sendMessage(chatId, text, extra);
-
-  const newData = setUi(data, { prompt_mid: m.message_id });
-  await writeState(userId, state, newData);
-  return m.message_id;
-}
-
-async function clearPrompt(ctx, userId) {
-  const chatId = ctx.chat?.id;
-  const { state, data } = await readState(userId);
-  const ui = getUi(data);
-  if (!ui.prompt_mid) return;
-
-  await safeDelete(ctx, chatId, ui.prompt_mid);
-  const newData = setUi(data, { prompt_mid: null });
-  await writeState(userId, state, newData);
-}
-
-/* =========================
-   History (premium back)
-========================= */
-function snapshotPack(state, data) {
-  // минимальный безопасный snapshot (без циклов)
-  return { state, data: JSON.parse(JSON.stringify(data)) };
-}
-
-function pushHistory(data, snap) {
-  const history = Array.isArray(data.history) ? data.history : [];
-  return { ...data, history: [...history, snap] };
-}
-
-function popHistory(data) {
-  const history = Array.isArray(data.history) ? data.history : [];
-  if (!history.length) return { data, snap: null };
-  const snap = history[history.length - 1];
-  return { data: { ...data, history: history.slice(0, -1) }, snap };
-}
-
-/* =========================
-   Mapping for summary/admin
-========================= */
-const MAPS = {
-  exp: { 0: "0", 1: "1 yil", "2p": "2+ yil" },
-  shift: { day: "Kunduz", night: "Kech", any: "Farqi yo‘q" },
-  start: { today: "Bugun", tomorrow: "Ertaga", week: "1 hafta ichida" },
-  license: { bc: "B + C", only_b: "Faqat B", other: "Boshqa/Yo‘q" },
-  alcohol: { no: "Ichmayman", yes: "Ichaman" },
-};
-
-function pretty(mapKey, val) {
-  const m = MAPS[mapKey] || {};
-  return m[val] || val || "-";
-}
-
-function summaryText(d) {
-  return (
-    "✅ Tekshirib oling:\n\n" +
-    `— Vakansiya: ${d.vac_button || "-"}\n` +
-    `— Ism: ${d.name || "-"}\n` +
-    `— Telefon: ${d.phone || "-"}\n` +
-    (d.needAge ? `— Yosh: ${d.age || "-"}\n` : "") +
-    `— Tajriba: ${pretty("exp", d.experience)}\n` +
-    `— Grafik: ${pretty("shift", d.shift)}\n` +
-    `— Qachondan: ${pretty("start", d.start_pref)}\n` +
-    (d.needLicense ? `— Guvohnoma: ${pretty("license", d.license)}\n` : "") +
-    (d.needAlcohol ? `— Alkogol: ${pretty("alcohol", d.alcohol)}\n` : "")
+async function createApplication(ctx, vacId) {
+  const userId = ctx.from.id;
+  const app = await q(
+    `insert into applications(vacancy_id,user_id,username,full_name,status)
+     values($1,$2,$3,$4,'draft') returning id`,
+    [
+      vacId,
+      userId,
+      ctx.from.username || "",
+      `${ctx.from.first_name || ""} ${ctx.from.last_name || ""}`.trim(),
+    ],
   );
+  return app.rows[0].id;
 }
 
-/* =========================
-   Public API
-========================= */
+function normAnswer(x) {
+  return String(x ?? "")
+    .trim()
+    .toLowerCase();
+}
+
+function checkCorrect(qn, answer) {
+  if (!qn.is_scored) return { is_correct: null, points: 0 };
+  if (qn.correct_answer === null || qn.correct_answer === undefined) {
+    return { is_correct: null, points: 0 }; // без автопроверки
+  }
+
+  const ca = qn.correct_answer; // jsonb: может быть строкой/числом/массивом
+  const a = normAnswer(answer);
+
+  // allow exact match for primitives
+  if (
+    typeof ca === "string" ||
+    typeof ca === "number" ||
+    typeof ca === "boolean"
+  ) {
+    const ok = normAnswer(ca) === a;
+    return { is_correct: ok, points: ok ? Number(qn.points || 1) : 0 };
+  }
+
+  // array of accepted answers
+  if (Array.isArray(ca)) {
+    const ok = ca.map(normAnswer).includes(a);
+    return { is_correct: ok, points: ok ? Number(qn.points || 1) : 0 };
+  }
+
+  // fallback
+  return { is_correct: null, points: 0 };
+}
+
 export async function startCandidate(ctx) {
   const userId = ctx.from?.id;
   if (!userId) return;
 
-  const vacs = await getActiveVacancies();
   await clearState(userId);
 
-  // init state
-  await writeState(userId, "cand_pick", { ui: {}, history: [] });
-
+  const vacs = await getActiveVacancies();
   if (!vacs.length) {
-    await upsertMain(ctx, userId, "Hozircha bo‘sh ish o‘rinlari yo‘q.", null);
+    await ctx.reply("Hozircha bo‘sh ish o‘rinlari yo‘q.");
     return;
   }
 
-  await upsertMain(
-    ctx,
-    userId,
-    "Assalomu alaykum!\nVakansiyani tanlang:",
-    kbVacancies(vacs),
-  );
-  await clearPrompt(ctx, userId);
+  await setState(userId, "cand_pick", {});
+  await ctx.reply("Assalomu alaykum!\nVakansiyani tanlang:", {
+    reply_markup: kbVacancies(vacs),
+  });
 }
 
-/* =========================
-   Callbacks
-========================= */
 export async function handleCandidateCallbacks(ctx) {
   const userId = ctx.from?.id;
   if (!userId) return;
 
   const cb = ctx.callbackQuery?.data || "";
-  const { state, data } = await readState(userId);
+  const st = await getState(userId);
+  const state = st?.state || "idle";
+  const data = st?.data || {};
 
-  // Global controls
+  if (cb === "cand:info") {
+    await ctx.answerCallbackQuery();
+    await ctx.reply(
+      "📌 Ma’lumot:\n\nAriza bosqichma-bosqich to‘ldiriladi.\nTelefon raqamni “📱 Raqamni yuborish” tugmasi bilan yuborasiz.",
+      { reply_markup: kbCandidateNav() },
+    );
+    return;
+  }
+
   if (cb === "cand:restart") {
     await ctx.answerCallbackQuery();
     await startCandidate(ctx);
     return;
   }
 
-  if (cb === "cand:info") {
-    await ctx.answerCallbackQuery();
-    await upsertMain(
-      ctx,
-      userId,
-      "📌 Qisqa ma’lumot:\n\nAriza tugmalar orqali to‘ldiriladi.\nTelefon raqamni “📱 Raqamni yuborish” tugmasi bilan yuborasiz.\n\nDavom etish uchun “⬅️ Ortga” ni bosing.",
-      kbInfoBack(),
-    );
-    return;
-  }
-
   if (cb === "cand:back") {
     await ctx.answerCallbackQuery();
-    const popped = popHistory(data);
-    if (!popped.snap) {
-      await startCandidate(ctx);
-      return;
-    }
-    // restore snapshot
-    await writeState(userId, popped.snap.state, popped.snap.data);
-    await redraw(ctx, userId);
-    return;
-  }
-
-  // Pick vacancy
-  if (cb.startsWith("vac:")) {
-    await ctx.answerCallbackQuery();
-    const vacId = Number(cb.split(":")[1]);
-    const vac = await getVacancy(vacId);
-
-    if (!vac || !vac.is_active) {
-      await upsertMain(ctx, userId, "Bu vakansiya hozir faol emas.", kbNav());
-      return;
-    }
-
-    // create application
-    const app = await q(
-      `insert into applications(vacancy_id,user_id,username,full_name)
-       values($1,$2,$3,$4) returning id`,
-      [
-        vacId,
-        userId,
-        ctx.from.username || "",
-        `${ctx.from.first_name || ""} ${ctx.from.last_name || ""}`.trim(),
-      ],
-    );
-    const appId = app.rows[0].id;
-
-    const filters = await getFilters(vacId);
-
-    const payload = {
-      ui: data.ui || {},
-      history: [],
-
-      vacId,
-      vac_button: vac.button_text,
-      appId,
-
-      // collected
-      age: null,
-      license: null,
-      alcohol: null,
-      name: "",
-      phone: "",
-      experience: "",
-      shift: "",
-      start_pref: "",
-
-      // flags from filters
-      needAge: filters.some((f) => f.type === "age_range"),
-      needLicense: filters.some((f) => f.type === "license_bc"),
-      needAlcohol: filters.some((f) => f.type === "no_alcohol"),
-    };
-
-    await writeState(userId, "cand_step", payload);
-
-    await upsertMain(
-      ctx,
-      userId,
-      `Tanlandi: ${vac.button_text}\n\nBoshlaymiz ✅`,
-      kbNav(),
-    );
-    await clearPrompt(ctx, userId);
-
-    await nextStep(ctx, userId);
-    return;
-  }
-
-  // Age bucket
-  if (cb.startsWith("age:")) {
-    await ctx.answerCallbackQuery();
-    const key = cb.split(":")[1];
-    const age =
-      key === "18_20" ? 20 : key === "21_25" ? 25 : key === "26_30" ? 30 : 31;
-
-    const snap = snapshotPack(state, data);
-    let d = pushHistory(data, snap);
-    d.age = age;
-
-    // Strict rule (как ты просил)
-    if (age >= 31) {
-      await rejectAndClose(
-        ctx,
-        userId,
-        d.appId,
-        "Rahmat! Afsuski, yosh bo‘yicha mos emassiz.",
-      );
-      return;
-    }
-
-    await writeState(userId, "cand_step", d);
-    await nextStep(ctx, userId);
-    return;
-  }
-
-  // License / alcohol
-  if (cb.startsWith("fresp:")) {
-    await ctx.answerCallbackQuery();
-    const [, key, value] = cb.split(":");
-
-    const snap = snapshotPack(state, data);
-    let d = pushHistory(data, snap);
-
-    if (key === "license") d.license = value;
-    if (key === "alcohol") d.alcohol = value;
-
-    // Strict rules (как ты просил)
-    if (key === "license" && value !== "bc") {
-      await rejectAndClose(ctx, userId, d.appId, "B va C toifalari kerak.");
-      return;
-    }
-    if (key === "alcohol" && value !== "no") {
-      await rejectAndClose(
-        ctx,
-        userId,
-        d.appId,
-        "Bu ish uchun alkogol ichmaslik shart.",
-      );
-      return;
-    }
-
-    await writeState(userId, "cand_step", d);
-    await nextStep(ctx, userId);
-    return;
-  }
-
-  // Experience
-  if (cb.startsWith("exp:")) {
-    await ctx.answerCallbackQuery();
-    const snap = snapshotPack(state, data);
-    let d = pushHistory(data, snap);
-    d.experience = cb.split(":")[1];
-    await writeState(userId, "cand_step", d);
-    await nextStep(ctx, userId);
-    return;
-  }
-
-  // Shift
-  if (cb.startsWith("shift:")) {
-    await ctx.answerCallbackQuery();
-    const snap = snapshotPack(state, data);
-    let d = pushHistory(data, snap);
-    d.shift = cb.split(":")[1];
-    await writeState(userId, "cand_step", d);
-    await nextStep(ctx, userId);
-    return;
-  }
-
-  // Start pref
-  if (cb.startsWith("start:")) {
-    await ctx.answerCallbackQuery();
-    const snap = snapshotPack(state, data);
-    let d = pushHistory(data, snap);
-    d.start_pref = cb.split(":")[1];
-    await writeState(userId, "cand_step", d);
-    await nextStep(ctx, userId);
-    return;
-  }
-
-  // Confirm
-  if (cb === "cand:confirm") {
-    await ctx.answerCallbackQuery();
-    try {
-      await finalizeAndSend(ctx, userId, data);
-    } catch (e) {
-      console.error("confirm error:", e);
-      await upsertMain(
-        ctx,
-        userId,
-        "❌ Xatolik. Ma’lumotlar saqlanmadi.\nIltimos, qaytadan urinib ko‘ring: 🔄 Qayta",
-        null,
-      );
-    }
-    return;
-  }
-
-  // Edit name
-  if (cb === "cand:edit_name") {
-    await ctx.answerCallbackQuery();
-    const snap = snapshotPack(state, data);
-    let d = pushHistory(data, snap);
-
-    await writeState(userId, "cand_wait_name", d);
-    await upsertPrompt(ctx, userId, "Ismingizni yozing:", {
-      reply_markup: kbRemoveReply(),
-    });
-    return;
-  }
-}
-
-/* =========================
-   Messages (text + contact)
-========================= */
-export async function handleCandidateMessages(ctx) {
-  const userId = ctx.from?.id;
-  if (!userId) return;
-
-  const { state, data } = await readState(userId);
-
-  // Reply-keyboard navigation (when contact keyboard is open)
-  const t = (ctx.message?.text || "").trim();
-  if (t === "⬅️ Ortga") {
-    const popped = popHistory(data);
-    if (!popped.snap) return startCandidate(ctx);
-    await writeState(userId, popped.snap.state, popped.snap.data);
-    await redraw(ctx, userId);
-    return;
-  }
-  if (t === "🔄 Qayta") {
+    // простая логика: назад = заново
     await startCandidate(ctx);
     return;
   }
 
-  // Contact
+  if (cb.startsWith("cand:vac:")) {
+    await ctx.answerCallbackQuery();
+    const vacId = Number(cb.split(":")[2]);
+    const vac = await getVacancy(vacId);
+    if (!vac || !vac.is_active) {
+      await ctx.reply("Bu vakansiya hozir faol emas.");
+      return;
+    }
+
+    const qs = await getQuestions(vacId);
+    const appId = await createApplication(ctx, vacId);
+
+    const payload = {
+      vacId,
+      vacButton: vac.button_text,
+      appId,
+      step: 0,
+      questions: qs,
+      name: "",
+      phone: "",
+      score_total: 0,
+      score_correct: 0,
+      score_wrong: 0,
+    };
+
+    await setState(userId, "cand_wait_name", payload);
+    await ctx.reply(`Tanlandi: ${vac.button_text}\n\nIsmingizni yozing:`, {
+      reply_markup: kbCandidateNav(),
+    });
+    return;
+  }
+
+  if (cb.startsWith("cand:ans:")) {
+    await ctx.answerCallbackQuery();
+    if (state !== "cand_wait_choice") return;
+
+    const answer = cb.slice("cand:ans:".length);
+    await processAnswer(ctx, answer);
+    return;
+  }
+}
+
+export async function handleCandidateMessages(ctx) {
+  const userId = ctx.from?.id;
+  if (!userId) return;
+
+  const st = await getState(userId);
+  const state = st?.state || "idle";
+  const data = st?.data || {};
+
+  // navigation with text (reply keyboard)
+  const text = (ctx.message?.text || "").trim();
+  if (text === "🔄 Qayta") {
+    await startCandidate(ctx);
+    return;
+  }
+
+  if (state === "cand_wait_name") {
+    if (!text || text.length < 2) {
+      await ctx.reply("Ismni to‘g‘ri yozing (kamida 2 harf).");
+      return;
+    }
+    data.name = text;
+
+    await q("update applications set name=$1 where id=$2", [
+      data.name,
+      data.appId,
+    ]);
+
+    await setState(userId, "cand_wait_contact", data);
+    await ctx.reply("Telefon raqamingizni yuboring:", {
+      reply_markup: kbRequestContact(),
+    });
+    return;
+  }
+
   if (state === "cand_wait_contact") {
     const contact = ctx.message?.contact;
     if (!contact?.phone_number) {
-      await upsertPrompt(
-        ctx,
-        userId,
-        "Iltimos, “📱 Raqamni yuborish” tugmasini bosing.",
-        {
-          reply_markup: kbRequestContact(),
-        },
-      );
+      await ctx.reply("Iltimos, “📱 Raqamni yuborish” tugmasini bosing.", {
+        reply_markup: kbRequestContact(),
+      });
       return;
     }
 
@@ -480,200 +220,185 @@ export async function handleCandidateMessages(ctx) {
       ? contact.phone_number
       : `+${contact.phone_number}`;
 
-    const snap = snapshotPack(state, data);
-    let d = pushHistory(data, snap);
-    d.phone = phone;
+    data.phone = phone;
 
-    await writeState(userId, "cand_step", d);
+    await q("update applications set phone=$1 where id=$2", [
+      data.phone,
+      data.appId,
+    ]);
 
-    // premium: убираем клавиатуру контакта сразу
-    await upsertPrompt(ctx, userId, "Rahmat ✅", {
-      reply_markup: kbRemoveReply(),
-    });
-    // и через step перерисуем главный экран
-    await nextStep(ctx, userId);
+    await ctx.reply("✅ Qabul qilindi.", { reply_markup: kbRemoveReply() });
+
+    // start questions
+    await setState(userId, "cand_asking", data);
+    await askNext(ctx);
     return;
   }
 
-  // Name
-  if (state === "cand_wait_name") {
-    const name = t;
-    if (!name || name.length < 2) {
-      await upsertPrompt(ctx, userId, "Ismni to‘g‘ri yozing (kamida 2 harf).", {
-        reply_markup: kbRemoveReply(),
-      });
+  if (state === "cand_wait_text") {
+    await processAnswer(ctx, text);
+    return;
+  }
+
+  if (state === "cand_wait_number") {
+    const n = Number(text);
+    if (!Number.isFinite(n)) {
+      await ctx.reply("Iltimos, raqam kiriting.");
       return;
     }
+    await processAnswer(ctx, String(n));
+    return;
+  }
 
-    const snap = snapshotPack(state, data);
-    let d = pushHistory(data, snap);
-    d.name = name;
-
-    await writeState(userId, "cand_step", d);
-    await clearPrompt(ctx, userId);
-    await nextStep(ctx, userId);
+  if (state === "cand_wait_phone") {
+    // phone question uses contact too, but if typed we accept
+    if (!text) {
+      await ctx.reply("Telefon raqamni kiriting.");
+      return;
+    }
+    await processAnswer(ctx, text);
     return;
   }
 }
 
-/* =========================
-   Step engine (single source of truth)
-========================= */
-async function nextStep(ctx, userId) {
-  const { data: d } = await readState(userId);
+async function askNext(ctx) {
+  const userId = ctx.from.id;
+  const st = await getState(userId);
+  const data = st.data;
 
-  // 1) Age (only if needed)
-  if (d.needAge && !d.age) {
-    await upsertMain(ctx, userId, "Yoshingizni tanlang:", kbAgeBuckets());
-    await clearPrompt(ctx, userId);
+  const qs = data.questions || [];
+  const i = Number(data.step || 0);
+
+  if (i >= qs.length) {
+    await finalize(ctx, data);
     return;
   }
 
-  // 2) License
-  if (d.needLicense && !d.license) {
-    await upsertMain(
-      ctx,
-      userId,
-      "Haydovchilik guvohnomangiz qaysi toifada?",
-      kbLicense(),
-    );
-    await clearPrompt(ctx, userId);
+  const qn = qs[i];
+  const header = `Savol ${i + 1}/${qs.length}\n\n${qn.text}`;
+
+  // types
+  if (qn.q_type === "yesno") {
+    await setState(userId, "cand_wait_choice", data);
+    await ctx.reply(header, { reply_markup: kbYesNo() });
     return;
   }
 
-  // 3) Alcohol
-  if (d.needAlcohol && !d.alcohol) {
-    await upsertMain(ctx, userId, "Alkogol ichasizmi?", kbAlcohol());
-    await clearPrompt(ctx, userId);
+  if (qn.q_type === "choice") {
+    await setState(userId, "cand_wait_choice", data);
+    await ctx.reply(header, { reply_markup: kbChoice(qn.options || []) });
     return;
   }
 
-  // 4) Name
-  if (!d.name) {
-    await upsertMain(ctx, userId, "Ismingizni kiriting:", kbNav());
-    await writeState(userId, "cand_wait_name", d);
-    await upsertPrompt(ctx, userId, "Ismingizni yozing:", {
-      reply_markup: kbRemoveReply(),
-    });
+  if (qn.q_type === "number") {
+    await setState(userId, "cand_wait_number", data);
+    await ctx.reply(header, { reply_markup: kbCandidateNav() });
     return;
   }
 
-  // 5) Phone (contact)
-  if (!d.phone) {
-    await upsertMain(ctx, userId, "Telefon raqamingizni yuboring:", kbNav());
-    await writeState(userId, "cand_wait_contact", d);
-    await upsertPrompt(ctx, userId, "Pastdagi tugma orqali yuboring:", {
-      reply_markup: kbRequestContact(),
-    });
+  if (qn.q_type === "phone") {
+    await setState(userId, "cand_wait_phone", data);
+    await ctx.reply(header, { reply_markup: kbCandidateNav() });
     return;
   }
 
-  // 6) Experience
-  if (!d.experience) {
-    await upsertMain(
-      ctx,
-      userId,
-      "Tajriba (ish tajribasi) ni tanlang:",
-      kbExperience(),
-    );
-    await clearPrompt(ctx, userId);
-    return;
-  }
-
-  // 7) Shift
-  if (!d.shift) {
-    await upsertMain(ctx, userId, "Qaysi grafik sizga mos?", kbShift());
-    await clearPrompt(ctx, userId);
-    return;
-  }
-
-  // 8) Start pref
-  if (!d.start_pref) {
-    await upsertMain(ctx, userId, "Qachondan ishlay olasiz?", kbStartPref());
-    await clearPrompt(ctx, userId);
-    return;
-  }
-
-  // 9) Summary
-  await upsertMain(ctx, userId, summaryText(d), kbConfirm());
-  await clearPrompt(ctx, userId);
+  // default text
+  await setState(userId, "cand_wait_text", data);
+  await ctx.reply(header, { reply_markup: kbCandidateNav() });
 }
 
-async function redraw(ctx, userId) {
-  const { state } = await readState(userId);
-  if (state === "cand_pick") return startCandidate(ctx);
-  await nextStep(ctx, userId);
+async function processAnswer(ctx, answer) {
+  const userId = ctx.from.id;
+  const st = await getState(userId);
+  const data = st.data;
+
+  const qs = data.questions || [];
+  const i = Number(data.step || 0);
+  const qn = qs[i];
+  if (!qn) {
+    await startCandidate(ctx);
+    return;
+  }
+
+  // auto-check (if correct_answer provided)
+  const chk = checkCorrect(qn, answer);
+
+  // store answer
+  await q(
+    `insert into application_answers(application_id, question_id, answer, is_correct, points)
+     values($1,$2,$3,$4,$5)
+     on conflict (application_id, question_id)
+     do update set answer=excluded.answer, is_correct=excluded.is_correct, points=excluded.points`,
+    [data.appId, qn.id, String(answer), chk.is_correct, chk.points],
+  );
+
+  // update scoring in memory + db
+  if (chk.is_correct === true) {
+    data.score_correct += 1;
+    data.score_total += chk.points;
+  } else if (chk.is_correct === false) {
+    data.score_wrong += 1;
+  }
+
+  data.step = i + 1;
+
+  await setState(userId, "cand_asking", data);
+  await askNext(ctx);
 }
 
-async function rejectAndClose(ctx, userId, appId, text) {
-  await q("update applications set status='rejected' where id=$1", [appId]);
-  await clearState(userId);
-  await upsertMain(ctx, userId, text, null);
-  await clearPrompt(ctx, userId);
-}
-
-/* =========================
-   Finalize -> DB + notify admins
-========================= */
-async function finalizeAndSend(ctx, userId, d) {
-  // save to DB
+async function finalize(ctx, data) {
+  // mark application
   await q(
     `update applications
-     set phone=$1, age=$2, experience=$3, shift=$4, start_pref=$5, license=$6, alcohol=$7
-     where id=$8`,
-    [
-      d.phone || null,
-      d.needAge ? d.age || null : null,
-      d.experience || null,
-      d.shift || null,
-      d.start_pref || null,
-      d.needLicense ? d.license || null : null,
-      d.needAlcohol ? d.alcohol || null : null,
-      d.appId,
-    ],
+     set status='new',
+         score_total=$1,
+         score_correct=$2,
+         score_wrong=$3,
+         finished_at=now()
+     where id=$4`,
+    [data.score_total, data.score_correct, data.score_wrong, data.appId],
   );
+
+  // build admin message with answers
+  const ans = await q(
+    `select vq.text, vq.q_type, aa.answer, aa.is_correct, aa.points
+     from application_answers aa
+     join vacancy_questions vq on vq.id=aa.question_id
+     where aa.application_id=$1
+     order by vq.sort asc, vq.id asc`,
+    [data.appId],
+  );
+
+  let msg =
+    `🧾 Ariza (${data.vacButton})\n` +
+    `— Ism: ${data.name || "-"}\n` +
+    `— Telefon: ${data.phone || "-"}\n` +
+    `— Username: ${ctx.from.username ? "@" + ctx.from.username : "-"}\n` +
+    `— UserID: ${ctx.from.id}\n\n` +
+    `📊 Natija:\n` +
+    `— To‘g‘ri: ${data.score_correct}\n` +
+    `— Noto‘g‘ri: ${data.score_wrong}\n` +
+    `— Ball: ${data.score_total}\n\n` +
+    `🧩 Javoblar:\n`;
+
+  for (const r of ans.rows) {
+    const mark =
+      r.is_correct === true ? "✅" : r.is_correct === false ? "❌" : "🕓";
+    msg += `${mark} ${r.text}\n→ ${r.answer}\n\n`;
+  }
 
   const adminIds = (process.env.ADMIN_IDS || "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
 
-  const app = await q("select * from applications where id=$1", [d.appId]);
-  const a = app.rows[0];
-
-  const adminMsg =
-    `🧾 Ariza (${d.vac_button})\n` +
-    `— Ism: ${d.name || a.full_name || "-"}\n` +
-    `— Telefon: ${a.phone || d.phone || "-"}\n` +
-    (d.needAge ? `— Yosh: ${a.age || d.age || "-"}\n` : "") +
-    `— Tajriba: ${pretty("exp", a.experience || d.experience)}\n` +
-    `— Grafik: ${pretty("shift", a.shift || d.shift)}\n` +
-    `— Qachondan: ${pretty("start", a.start_pref || d.start_pref)}\n` +
-    (d.needLicense
-      ? `— Guvohnoma: ${pretty("license", a.license || d.license)}\n`
-      : "") +
-    (d.needAlcohol
-      ? `— Alkogol: ${pretty("alcohol", a.alcohol || d.alcohol)}\n`
-      : "") +
-    `— Username: ${a.username ? "@" + a.username : "-"}\n` +
-    `— UserID: ${a.user_id}\n`;
-
-  // import kbStatus lazily (no circular)
-  const { kbStatus } = await import("./keyboards.js");
+  // lazy import to avoid cycle
+  const { kbAppRow } = await import("./keyboards.js");
 
   for (const adm of adminIds) {
-    await ctx.api.sendMessage(adm, adminMsg, {
-      reply_markup: kbStatus(d.appId),
-    });
+    await ctx.api.sendMessage(adm, msg, { reply_markup: kbAppRow(data.appId) });
   }
 
-  await clearState(userId);
-  await clearPrompt(ctx, userId);
-
-  await upsertMain(
-    ctx,
-    userId,
-    "Rahmat! Arizangiz qabul qilindi ✅\nTez orada bog‘lanamiz.",
-    null,
-  );
+  await clearState(ctx.from.id);
+  await ctx.reply("Rahmat! Arizangiz qabul qilindi ✅\nTez orada bog‘lanamiz.");
 }
