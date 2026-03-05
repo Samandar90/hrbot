@@ -1,11 +1,29 @@
-// keyboards.js (PREMIUM)
+// keyboards.js (PREMIUM v2)
 import { InlineKeyboard, Keyboard } from "grammy";
 
-/* Candidate inline keyboards */
+/* ===============================
+   Candidate keyboards
+================================ */
+
 export function kbVacancies(vacancies) {
   const kb = new InlineKeyboard();
-  for (const v of vacancies) kb.text(v.button_text, `vac:${v.id}`).row();
-  kb.row().text("ℹ️ Ma’lumot", "cand:info").text("🔄 Qayta", "cand:restart");
+
+  for (let i = 0; i < vacancies.length; i += 2) {
+    const v1 = vacancies[i];
+    const v2 = vacancies[i + 1];
+
+    if (v2) {
+      kb.text(v1.button_text, `vac:${v1.id}`)
+        .text(v2.button_text, `vac:${v2.id}`)
+        .row();
+    } else {
+      kb.text(v1.button_text, `vac:${v1.id}`).row();
+    }
+  }
+
+  kb.row().text("ℹ️ Ma’lumot", "cand:info");
+  kb.row().text("🔄 Qayta", "cand:restart");
+
   return kb;
 }
 
@@ -85,6 +103,7 @@ export function kbConfirm() {
     .text("✅ Tasdiqlash", "cand:confirm")
     .row()
     .text("✏️ Ismni o‘zgartirish", "cand:edit_name")
+    .text("📱 Telefonni o‘zgartirish", "cand:edit_phone")
     .row()
     .text("🔄 Qayta", "cand:restart");
 }
@@ -93,7 +112,10 @@ export function kbInfoBack() {
   return new InlineKeyboard().text("⬅️ Ortga", "cand:back");
 }
 
-/* Reply keyboard for contact */
+/* ===============================
+   Contact keyboard
+================================ */
+
 export function kbRequestContact() {
   return new Keyboard()
     .requestContact("📱 Raqamni yuborish")
@@ -108,7 +130,10 @@ export function kbRemoveReply() {
   return { remove_keyboard: true };
 }
 
-/* Admin */
+/* ===============================
+   Admin buttons
+================================ */
+
 export function kbStatus(appId) {
   return new InlineKeyboard()
     .text("✅ Qabul", `st:${appId}:accepted`)
