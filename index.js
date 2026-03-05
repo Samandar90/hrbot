@@ -52,5 +52,10 @@ bot.on("callback_query:data", async (ctx) => {
 });
 
 bot.catch((err) => console.error("BOT ERROR:", err));
+
 console.log("Bot starting...");
-bot.start();
+
+// kill webhook + drop pending updates (fix 409 when switching modes)
+await bot.api.deleteWebhook({ drop_pending_updates: true });
+
+bot.start({ drop_pending_updates: true });
