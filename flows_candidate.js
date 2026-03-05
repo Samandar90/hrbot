@@ -410,7 +410,17 @@ export async function handleCandidateCallbacks(ctx) {
   // Confirm
   if (cb === "cand:confirm") {
     await ctx.answerCallbackQuery();
-    await finalizeAndSend(ctx, userId, data);
+    try {
+      await finalizeAndSend(ctx, userId, data);
+    } catch (e) {
+      console.error("confirm error:", e);
+      await upsertMain(
+        ctx,
+        userId,
+        "❌ Xatolik. Ma’lumotlar saqlanmadi.\nIltimos, qaytadan urinib ko‘ring: 🔄 Qayta",
+        null,
+      );
+    }
     return;
   }
 
